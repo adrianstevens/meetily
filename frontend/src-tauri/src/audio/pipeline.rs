@@ -694,6 +694,8 @@ pub struct AudioPipeline {
     mixer: ProfessionalAudioMixer,
     // Recording sender for pre-mixed audio
     recording_sender_for_mixed: Option<mpsc::UnboundedSender<AudioChunk>>,
+    // Last dominant speaker detected (used for flush path)
+    last_dominant_device: DeviceType,
 }
 
 impl AudioPipeline {
@@ -760,6 +762,7 @@ impl AudioPipeline {
             ring_buffer,
             mixer,
             recording_sender_for_mixed: None,  // Will be set by manager
+            last_dominant_device: DeviceType::Microphone,
         }
     }
 
@@ -831,6 +834,18 @@ impl AudioPipeline {
                             // Previous 2x gain was causing excessive limiting/distortion
                             let mixed_with_gain = mixed_clean;
 
+                            // Determine dominant speaker by comparing RMS energy of mic vs system window
+                            let mic_energy: f32 = mic_window.iter().map(|&x| x * x).sum::<f32>()
+                                / mic_window.len().max(1) as f32;
+                            let sys_energy: f32 = sys_window.iter().map(|&x| x * x).sum::<f32>()
+                                / sys_window.len().max(1) as f32;
+                            let dominant_device = if mic_energy >= sys_energy {
+                                DeviceType::Microphone
+                            } else {
+                                DeviceType::System
+                            };
+                            self.last_dominant_device = dominant_device.clone();
+
                             // STEP 3: Send mixed audio for transcription (VAD + Whisper)
                             match self.vad_processor.process_audio(&mixed_with_gain) {
                                 Ok(speech_segments) => {
@@ -838,15 +853,15 @@ impl AudioPipeline {
                                         let duration_ms = segment.end_timestamp_ms - segment.start_timestamp_ms;
 
                                         if segment.samples.len() >= 800 {  // Minimum 50ms at 16kHz - matches Parakeet capability
-                                            info!("📤 Sending VAD segment: {:.1}ms, {} samples",
-                                                  duration_ms, segment.samples.len());
+                                            info!("📤 Sending VAD segment: {:.1}ms, {} samples (speaker: {:?})",
+                                                  duration_ms, segment.samples.len(), dominant_device);
 
                                             let transcription_chunk = AudioChunk {
                                                 data: segment.samples,
                                                 sample_rate: 16000,
                                                 timestamp: segment.start_timestamp_ms / 1000.0,
                                                 chunk_id: self.chunk_id_counter,
-                                                device_type: DeviceType::Microphone,  // Mixed audio
+                                                device_type: dominant_device.clone(),
                                             };
 
                                             if let Err(e) = self.transcription_sender.send(transcription_chunk) {
@@ -916,7 +931,7 @@ impl AudioPipeline {
                             sample_rate: 16000,
                             timestamp: segment.start_timestamp_ms / 1000.0,
                             chunk_id: self.chunk_id_counter,
-                            device_type: DeviceType::Microphone,
+                            device_type: self.last_dominant_device.clone(),
                         };
 
                         if let Err(e) = self.transcription_sender.send(transcription_chunk) {

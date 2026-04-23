@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Tuple, Literal
+from typing import List, Tuple, Literal, Optional
 from pydantic_ai import Agent
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.groq import GroqModel
@@ -74,6 +74,35 @@ class SummaryResponse(BaseModel):
     ImmediateActionItems: Section
     NextSteps: Section
     MeetingNotes: MeetingNotes
+
+class LabeledSegment(BaseModel):
+    """A transcript segment with speaker label and timestamp."""
+    speaker: Literal["You", "Them"]
+    text: str
+    timestamp_ms: int
+
+
+def merge_labeled_segments(segments: List[LabeledSegment]) -> str:
+    """Merge labeled segments into a single transcript string, sorted by timestamp."""
+    sorted_segments = sorted(segments, key=lambda s: s.timestamp_ms)
+    lines = []
+    current_speaker: Optional[str] = None
+    current_text: List[str] = []
+
+    for seg in sorted_segments:
+        if seg.speaker != current_speaker:
+            if current_text and current_speaker:
+                lines.append(f"{current_speaker}: {' '.join(current_text)}")
+            current_speaker = seg.speaker
+            current_text = [seg.text]
+        else:
+            current_text.append(seg.text)
+
+    if current_text and current_speaker:
+        lines.append(f"{current_speaker}: {' '.join(current_text)}")
+
+    return "\n".join(lines)
+
 
 # --- Main Class Used by main.py ---
 
@@ -232,6 +261,19 @@ class TranscriptProcessor:
             logger.error(f"Error during transcript processing: {str(e)}", exc_info=True)
             raise
     
+    async def process_labeled_transcript(
+        self,
+        segments: List[LabeledSegment],
+        model: str,
+        model_name: str,
+        chunk_size: int = 5000,
+        overlap: int = 1000,
+        custom_prompt: str = ""
+    ) -> Tuple[int, List[str]]:
+        """Process a speaker-labeled transcript (mic + system audio) into a meeting summary."""
+        labeled_text = merge_labeled_segments(segments)
+        return await self.process_transcript(labeled_text, model, model_name, chunk_size, overlap, custom_prompt)
+
     async def chat_ollama_model(self, model_name: str, transcript: str, custom_prompt: str):
         message = {
         'role': 'system',

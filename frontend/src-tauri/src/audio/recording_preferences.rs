@@ -69,8 +69,9 @@ pub fn get_default_recordings_folder() -> PathBuf {
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        // Linux/Others: ~/Documents/meetily-recordings
+        // Linux/Others: ~/Documents/meetily-recordings, fallback to ~/meetily-recordings
         dirs::document_dir()
+            .or_else(|| dirs::home_dir())
             .unwrap_or_else(|| PathBuf::from("."))
             .join("meetily-recordings")
     }
@@ -108,7 +109,7 @@ pub async fn load_recording_preferences<R: Runtime>(
     // Try to get the preferences from store
     let prefs = if let Some(value) = store.get("preferences") {
         match serde_json::from_value::<RecordingPreferences>(value.clone()) {
-            Ok(mut p) => {
+            Ok(p) => {
                 info!("Loaded recording preferences from store");
                 // Update macOS backend to current value if needed
                 #[cfg(target_os = "macos")]

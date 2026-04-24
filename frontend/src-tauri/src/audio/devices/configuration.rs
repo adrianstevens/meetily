@@ -124,6 +124,19 @@ pub async fn get_device_and_config(
 
         match audio_device.device_type {
             DeviceType::Input => {
+                // On Linux (WSLg), hardware ALSA cards may not exist — try default_input_device first
+                #[cfg(target_os = "linux")]
+                if let Some(device) = host.default_input_device() {
+                    if let Ok(name) = device.name() {
+                        if name == audio_device.name {
+                            let default_config = device
+                                .default_input_config()
+                                .map_err(|e| anyhow!("Failed to get default input config: {}", e))?;
+                            return Ok((device, default_config));
+                        }
+                    }
+                }
+
                 for device in host.input_devices()? {
                     if let Ok(name) = device.name() {
                         if name == audio_device.name {
@@ -154,16 +167,15 @@ pub async fn get_device_and_config(
 
                 #[cfg(target_os = "linux")]
                 {
-                    // For Linux, we use PulseAudio monitor sources for system audio
-                    if let Ok(pulse_host) = cpal::host_from_id(cpal::HostId::Alsa) {
-                        for device in pulse_host.input_devices()? {
-                            if let Ok(name) = device.name() {
-                                if name == audio_device.name {
-                                    let default_config = device
-                                        .default_input_config()
-                                        .map_err(|e| anyhow!("Failed to get default input config: {}", e))?;
-                                    return Ok((device, default_config));
-                                }
+                    // Use host.devices() to find monitor sources — user-defined .asoundrc devices
+                    // (e.g. meetily_monitor) may not appear in input_devices() or output_devices().
+                    for device in host.devices()? {
+                        if let Ok(name) = device.name() {
+                            if name == audio_device.name {
+                                let default_config = device
+                                    .default_input_config()
+                                    .map_err(|e| anyhow!("Failed to get default input config: {}", e))?;
+                                return Ok((device, default_config));
                             }
                         }
                     }
